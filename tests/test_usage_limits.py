@@ -447,7 +447,7 @@ def test_usage_history_window_calculation():
     import time
 
     history = UsageHistory()
-    current_time = time.time()
+    current_time = time.monotonic()
 
     # Add entries at different times
     history.add_entry(RequestUsage(input_tokens=100, output_tokens=50), timestamp=current_time - 90)  # 90 seconds ago
@@ -468,7 +468,7 @@ def test_usage_history_cleanup():
     import time
 
     history = UsageHistory()
-    current_time = time.time()
+    current_time = time.monotonic()
 
     # Add entries
     history.add_entry(RequestUsage(input_tokens=100), timestamp=current_time - 90)

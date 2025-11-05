@@ -255,7 +255,7 @@ class TimedUsageEntry:
     """
 
     timestamp: float
-    """Unix timestamp when this usage occurred."""
+    """Monotonic timestamp (from time.monotonic()) when this usage occurred."""
 
     usage: RequestUsage
     """The usage information for this request."""
@@ -267,6 +267,9 @@ class UsageHistory:
 
     This class maintains a history of usage entries with timestamps,
     allowing calculation of usage within sliding time windows (e.g., last 60 seconds).
+
+    Note: Uses monotonic time (time.monotonic()) for timestamps to avoid issues with
+    system clock adjustments, DST changes, or NTP corrections.
     """
 
     entries: list[TimedUsageEntry] = field(default_factory=list)
@@ -277,10 +280,10 @@ class UsageHistory:
 
         Args:
             usage: The usage information to record.
-            timestamp: Optional explicit timestamp. If None, uses current time.
+            timestamp: Optional explicit timestamp. If None, uses current monotonic time.
         """
         if timestamp is None:
-            timestamp = time.time()
+            timestamp = time.monotonic()
         self.entries.append(TimedUsageEntry(timestamp=timestamp, usage=usage))
 
     def get_usage_in_window(self, window_seconds: float) -> RunUsage:
@@ -292,7 +295,7 @@ class UsageHistory:
         Returns:
             Aggregated usage from all entries within the time window.
         """
-        cutoff = time.time() - window_seconds
+        cutoff = time.monotonic() - window_seconds
 
         # Sum up usage from entries within the window
         total = RunUsage()
@@ -312,7 +315,7 @@ class UsageHistory:
         Args:
             window_seconds: Entries older than this will be removed.
         """
-        cutoff = time.time() - window_seconds
+        cutoff = time.monotonic() - window_seconds
         self.entries = [e for e in self.entries if e.timestamp >= cutoff]
 
 
