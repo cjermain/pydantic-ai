@@ -15,6 +15,7 @@ from . import _utils, messages as _messages
 if TYPE_CHECKING:
     from .models import Model
     from .result import RunUsage
+    from .usage import UsageHistory
 
 # TODO (v2): Change the default for all typevars like this from `None` to `object`
 AgentDepsT = TypeVar('AgentDepsT', default=None, contravariant=True)
@@ -34,6 +35,8 @@ class RunContext(Generic[RunContextAgentDepsT]):
     """The model used in this run."""
     usage: RunUsage
     """LLM usage associated with the run."""
+    usage_history: UsageHistory
+    """Usage history for per-minute rate limiting."""
     prompt: str | Sequence[_messages.UserContent] | None = None
     """The original user prompt passed to the run."""
     messages: list[_messages.ModelMessage] = field(default_factory=list)

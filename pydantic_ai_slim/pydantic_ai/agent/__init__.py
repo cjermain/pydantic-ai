@@ -461,6 +461,7 @@ class Agent(AbstractAgent[AgentDepsT, OutputDataT]):
         model_settings: ModelSettings | None = None,
         usage_limits: _usage.UsageLimits | None = None,
         usage: _usage.RunUsage | None = None,
+        usage_history: _usage.UsageHistory | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
@@ -535,6 +536,7 @@ class Agent(AbstractAgent[AgentDepsT, OutputDataT]):
             model_settings: Optional settings to use for this model's request.
             usage_limits: Optional limits on model request count or token usage.
             usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            usage_history: Optional usage history to start with, required for per-minute rate limiting across agents.
             infer_name: Whether to try to infer the agent name from the call frame if it's not set.
             toolsets: Optional additional toolsets for this run.
             builtin_tools: Optional additional builtin tools for this run.
@@ -572,9 +574,11 @@ class Agent(AbstractAgent[AgentDepsT, OutputDataT]):
 
         # Build the initial state
         usage = usage or _usage.RunUsage()
+        usage_history = usage_history or _usage.UsageHistory()
         state = _agent_graph.GraphAgentState(
             message_history=list(message_history) if message_history else [],
             usage=usage,
+            usage_history=usage_history,
             retries=0,
             run_step=0,
         )

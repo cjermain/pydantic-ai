@@ -450,7 +450,7 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         model_response = streamed_response.get()
 
-        self._finish_handling(ctx, model_response)
+        await self._finish_handling(ctx, model_response)
         assert self._result is not None  # this should be set by the previous line
 
     async def _make_request(
@@ -463,7 +463,7 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
         model_response = await ctx.deps.model.request(message_history, model_settings, model_request_parameters)
         ctx.state.usage.requests += 1
 
-        return self._finish_handling(ctx, model_response)
+        return await self._finish_handling(ctx, model_response)
 
     async def _prepare_request(
         self, ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]]
@@ -495,9 +495,9 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
         model_settings = ctx.deps.model_settings
         usage = ctx.state.usage
 
-        # Clean up old usage history entries to prevent memory growth
-        if ctx.deps.usage_limits.has_per_minute_limits():
-            ctx.state.usage_history.cleanup_old_entries(60.0)
+        # Always clean up old usage history entries to prevent memory growth
+        # (even if per-minute limits are disabled now, they may have been enabled earlier)
+        ctx.state.usage_history.cleanup_old_entries(60.0)
 
         projected_input_tokens = 0
         if ctx.deps.usage_limits.count_tokens_before_request:
@@ -513,13 +513,13 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         # Check per-minute limits before request
         if ctx.deps.usage_limits.has_per_minute_limits():
-            ctx.deps.usage_limits.check_per_minute_limits_before_request(
+            await ctx.deps.usage_limits.check_per_minute_limits_before_request(
                 ctx.state.usage_history, projected_input_tokens=projected_input_tokens
             )
 
         return model_settings, model_request_parameters, message_history, run_context
 
-    def _finish_handling(
+    async def _finish_handling(
         self,
         ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]],
         response: _messages.ModelResponse,
@@ -537,7 +537,7 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
             # Check per-minute limits
             if ctx.deps.usage_limits.has_per_minute_limits():
-                ctx.deps.usage_limits.check_per_minute_limits_after_response(ctx.state.usage_history)
+                await ctx.deps.usage_limits.check_per_minute_limits_after_response(ctx.state.usage_history)
 
         # Append the model response to state.message_history
         ctx.state.message_history.append(response)
@@ -786,6 +786,7 @@ def build_run_context(ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT
         deps=ctx.deps.user_deps,
         model=ctx.deps.model,
         usage=ctx.state.usage,
+        usage_history=ctx.state.usage_history,
         prompt=ctx.deps.prompt,
         messages=ctx.state.message_history,
         tracer=ctx.deps.tracer,

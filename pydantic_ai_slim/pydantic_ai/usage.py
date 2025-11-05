@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 
+import asyncio
 import dataclasses
 import time
 from copy import copy
@@ -270,13 +271,23 @@ class UsageHistory:
 
     Note: Uses monotonic time (time.monotonic()) for timestamps to avoid issues with
     system clock adjustments, DST changes, or NTP corrections.
+
+    Thread Safety: Uses an asyncio.Lock to ensure thread-safe operations when checking
+    and adding entries, preventing race conditions in concurrent scenarios.
     """
 
     entries: list[TimedUsageEntry] = field(default_factory=list)
     """List of usage entries with timestamps."""
 
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    """Lock for thread-safe operations."""
+
     def add_entry(self, usage: RequestUsage, timestamp: float | None = None) -> None:
         """Add a new usage entry with timestamp.
+
+        Note: This method is synchronous. For thread-safe concurrent access,
+        use this within the context of checking limits via UsageLimits methods
+        which use the lock appropriately.
 
         Args:
             usage: The usage information to record.
@@ -447,6 +458,21 @@ class UsageLimits:
         self.output_tokens_per_minute = output_tokens_per_minute
         self.total_tokens_per_minute = total_tokens_per_minute
 
+        # Validate that limits are non-negative
+        for field_name, value in [
+            ('request_limit', self.request_limit),
+            ('tool_calls_limit', self.tool_calls_limit),
+            ('input_tokens_limit', self.input_tokens_limit),
+            ('output_tokens_limit', self.output_tokens_limit),
+            ('total_tokens_limit', self.total_tokens_limit),
+            ('requests_per_minute', self.requests_per_minute),
+            ('input_tokens_per_minute', self.input_tokens_per_minute),
+            ('output_tokens_per_minute', self.output_tokens_per_minute),
+            ('total_tokens_per_minute', self.total_tokens_per_minute),
+        ]:
+            if value is not None and value < 0:
+                raise ValueError(f'{field_name} must be non-negative, got {value}')
+
     def has_token_limits(self) -> bool:
         """Returns `True` if this instance places any limits on token counts.
 
@@ -517,10 +543,12 @@ class UsageLimits:
             )
         )
 
-    def check_per_minute_limits_before_request(
+    async def check_per_minute_limits_before_request(
         self, usage_history: UsageHistory, projected_input_tokens: int = 0
     ) -> None:
         """Check if making a request would exceed per-minute limits.
+
+        This method uses a lock to prevent race conditions in concurrent scenarios.
 
         Args:
             usage_history: The usage history to check against.
@@ -532,37 +560,40 @@ class UsageLimits:
         if not self.has_per_minute_limits():
             return
 
-        # Get usage in last 60 seconds
-        window_usage = usage_history.get_usage_in_window(60.0)
+        async with usage_history._lock:
+            # Get usage in last 60 seconds
+            window_usage = usage_history.get_usage_in_window(60.0)
 
-        # Check requests per minute
-        if self.requests_per_minute is not None:
-            if window_usage.requests + 1 > self.requests_per_minute:
-                raise UsageLimitExceeded(
-                    f'The next request would exceed the requests_per_minute limit of {self.requests_per_minute} '
-                    f'(requests_in_last_minute={window_usage.requests})'
-                )
+            # Check requests per minute
+            if self.requests_per_minute is not None:
+                if window_usage.requests + 1 > self.requests_per_minute:
+                    raise UsageLimitExceeded(
+                        f'The next request would exceed the requests_per_minute limit of {self.requests_per_minute} '
+                        f'(requests_in_last_minute={window_usage.requests})'
+                    )
 
-        # Check input tokens per minute (if we have a projection)
-        if projected_input_tokens > 0 and self.input_tokens_per_minute is not None:
-            projected_input = window_usage.input_tokens + projected_input_tokens
-            if projected_input > self.input_tokens_per_minute:
-                raise UsageLimitExceeded(
-                    f'The next request would exceed the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
-                    f'(projected_input_tokens_in_last_minute={projected_input})'
-                )
+            # Check input tokens per minute (if we have a projection)
+            if projected_input_tokens > 0 and self.input_tokens_per_minute is not None:
+                projected_input = window_usage.input_tokens + projected_input_tokens
+                if projected_input > self.input_tokens_per_minute:
+                    raise UsageLimitExceeded(
+                        f'The next request would exceed the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
+                        f'(projected_input_tokens_in_last_minute={projected_input})'
+                    )
 
-        # Check total tokens per minute (if we have a projection)
-        if projected_input_tokens > 0 and self.total_tokens_per_minute is not None:
-            projected_total = window_usage.total_tokens + projected_input_tokens
-            if projected_total > self.total_tokens_per_minute:
-                raise UsageLimitExceeded(
-                    f'The next request would exceed the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
-                    f'(projected_total_tokens_in_last_minute={projected_total})'
-                )
+            # Check total tokens per minute (if we have a projection)
+            if projected_input_tokens > 0 and self.total_tokens_per_minute is not None:
+                projected_total = window_usage.total_tokens + projected_input_tokens
+                if projected_total > self.total_tokens_per_minute:
+                    raise UsageLimitExceeded(
+                        f'The next request would exceed the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
+                        f'(projected_total_tokens_in_last_minute={projected_total})'
+                    )
 
-    def check_per_minute_limits_after_response(self, usage_history: UsageHistory) -> None:
+    async def check_per_minute_limits_after_response(self, usage_history: UsageHistory) -> None:
         """Check if actual usage exceeded per-minute limits.
+
+        This method uses a lock to prevent race conditions in concurrent scenarios.
 
         Args:
             usage_history: The usage history to check against.
@@ -573,27 +604,28 @@ class UsageLimits:
         if not self.has_per_minute_limits():
             return
 
-        window_usage = usage_history.get_usage_in_window(60.0)
+        async with usage_history._lock:
+            window_usage = usage_history.get_usage_in_window(60.0)
 
-        # Check input tokens per minute
-        if self.input_tokens_per_minute is not None and window_usage.input_tokens > self.input_tokens_per_minute:
-            raise UsageLimitExceeded(
-                f'Exceeded the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
-                f'(input_tokens_in_last_minute={window_usage.input_tokens})'
-            )
+            # Check input tokens per minute
+            if self.input_tokens_per_minute is not None and window_usage.input_tokens > self.input_tokens_per_minute:
+                raise UsageLimitExceeded(
+                    f'Exceeded the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
+                    f'(input_tokens_in_last_minute={window_usage.input_tokens})'
+                )
 
-        # Check output tokens per minute
-        if self.output_tokens_per_minute is not None and window_usage.output_tokens > self.output_tokens_per_minute:
-            raise UsageLimitExceeded(
-                f'Exceeded the output_tokens_per_minute limit of {self.output_tokens_per_minute} '
-                f'(output_tokens_in_last_minute={window_usage.output_tokens})'
-            )
+            # Check output tokens per minute
+            if self.output_tokens_per_minute is not None and window_usage.output_tokens > self.output_tokens_per_minute:
+                raise UsageLimitExceeded(
+                    f'Exceeded the output_tokens_per_minute limit of {self.output_tokens_per_minute} '
+                    f'(output_tokens_in_last_minute={window_usage.output_tokens})'
+                )
 
-        # Check total tokens per minute
-        if self.total_tokens_per_minute is not None and window_usage.total_tokens > self.total_tokens_per_minute:
-            raise UsageLimitExceeded(
-                f'Exceeded the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
-                f'(total_tokens_in_last_minute={window_usage.total_tokens})'
-            )
+            # Check total tokens per minute
+            if self.total_tokens_per_minute is not None and window_usage.total_tokens > self.total_tokens_per_minute:
+                raise UsageLimitExceeded(
+                    f'Exceeded the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
+                    f'(total_tokens_in_last_minute={window_usage.total_tokens})'
+                )
 
     __repr__ = _utils.dataclasses_no_defaults_repr

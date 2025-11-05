@@ -25,7 +25,7 @@ from .output import (
     OutputDataT,
     ToolOutput,
 )
-from .usage import RunUsage, UsageLimits
+from .usage import RunUsage, UsageHistory, UsageLimits
 
 if TYPE_CHECKING:
     from .run import AgentRunResult
@@ -267,7 +267,7 @@ class AgentStream(Generic[AgentDepsT, OutputDataT]):
         """Stream [`ModelResponseStreamEvent`][pydantic_ai.messages.ModelResponseStreamEvent]s."""
         if self._agent_stream_iterator is None:
             self._agent_stream_iterator = _get_usage_checking_stream_response(
-                self._raw_stream_response, self._usage_limits, self.usage
+                self._raw_stream_response, self._usage_limits, self.usage, self._run_ctx.usage_history
             )
 
         return self._agent_stream_iterator
@@ -730,12 +730,21 @@ def _get_usage_checking_stream_response(
     stream_response: models.StreamedResponse,
     limits: UsageLimits | None,
     get_usage: Callable[[], RunUsage],
+    usage_history: UsageHistory | None = None,
 ) -> AsyncIterator[ModelResponseStreamEvent]:
-    if limits is not None and limits.has_token_limits():
+    has_limits = limits is not None and (limits.has_token_limits() or limits.has_per_minute_limits())
+
+    if has_limits:
 
         async def _usage_checking_iterator():
             async for item in stream_response:
+                # Check cumulative token limits
                 limits.check_tokens(get_usage())
+
+                # Check per-minute limits
+                if limits.has_per_minute_limits() and usage_history is not None:
+                    await limits.check_per_minute_limits_after_response(usage_history)
+
                 yield item
 
         return _usage_checking_iterator()
