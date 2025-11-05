@@ -90,6 +90,7 @@ class GraphAgentState:
 
     message_history: list[_messages.ModelMessage] = dataclasses.field(default_factory=list)
     usage: _usage.RunUsage = dataclasses.field(default_factory=_usage.RunUsage)
+    usage_history: _usage.UsageHistory = dataclasses.field(default_factory=_usage.UsageHistory)
     retries: int = 0
     run_step: int = 0
 
@@ -493,14 +494,28 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         model_settings = ctx.deps.model_settings
         usage = ctx.state.usage
+
+        # Clean up old usage history entries to prevent memory growth
+        if ctx.deps.usage_limits.has_per_minute_limits():
+            ctx.state.usage_history.cleanup_old_entries(60.0)
+
+        projected_input_tokens = 0
         if ctx.deps.usage_limits.count_tokens_before_request:
             # Copy to avoid modifying the original usage object with the counted usage
             usage = deepcopy(usage)
 
             counted_usage = await ctx.deps.model.count_tokens(message_history, model_settings, model_request_parameters)
             usage.incr(counted_usage)
+            projected_input_tokens = counted_usage.input_tokens
 
+        # Check cumulative limits before request
         ctx.deps.usage_limits.check_before_request(usage)
+
+        # Check per-minute limits before request
+        if ctx.deps.usage_limits.has_per_minute_limits():
+            ctx.deps.usage_limits.check_per_minute_limits_before_request(
+                ctx.state.usage_history, projected_input_tokens=projected_input_tokens
+            )
 
         return model_settings, model_request_parameters, message_history, run_context
 
@@ -511,8 +526,18 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
     ) -> CallToolsNode[DepsT, NodeRunEndT]:
         # Update usage
         ctx.state.usage.incr(response.usage)
+
+        # Add response to usage history for per-minute rate limiting
+        if ctx.deps.usage_limits.has_per_minute_limits():
+            ctx.state.usage_history.add_entry(response.usage)
+
         if ctx.deps.usage_limits:  # pragma: no branch
+            # Check cumulative token limits
             ctx.deps.usage_limits.check_tokens(ctx.state.usage)
+
+            # Check per-minute limits
+            if ctx.deps.usage_limits.has_per_minute_limits():
+                ctx.deps.usage_limits.check_per_minute_limits_after_response(ctx.state.usage_history)
 
         # Append the model response to state.message_history
         ctx.state.message_history.append(response)

@@ -1,8 +1,9 @@
 from __future__ import annotations as _annotations
 
 import dataclasses
+import time
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Annotated, Any
 
 from genai_prices.data_snapshot import get_snapshot
@@ -12,7 +13,7 @@ from typing_extensions import deprecated, overload
 from . import _utils
 from .exceptions import UsageLimitExceeded
 
-__all__ = 'RequestUsage', 'RunUsage', 'Usage', 'UsageLimits'
+__all__ = 'RequestUsage', 'RunUsage', 'Usage', 'UsageLimits', 'UsageHistory', 'TimedUsageEntry'
 
 
 @dataclass(repr=False, kw_only=True)
@@ -245,6 +246,76 @@ class Usage(RunUsage):
     """Deprecated alias for `RunUsage`."""
 
 
+@dataclass
+class TimedUsageEntry:
+    """A single usage entry with timestamp for rate limiting.
+
+    This class tracks when a request was made and its associated usage,
+    enabling sliding window rate limit calculations.
+    """
+
+    timestamp: float
+    """Unix timestamp when this usage occurred."""
+
+    usage: RequestUsage
+    """The usage information for this request."""
+
+
+@dataclass
+class UsageHistory:
+    """Tracks usage history for per-minute rate limiting.
+
+    This class maintains a history of usage entries with timestamps,
+    allowing calculation of usage within sliding time windows (e.g., last 60 seconds).
+    """
+
+    entries: list[TimedUsageEntry] = field(default_factory=list)
+    """List of usage entries with timestamps."""
+
+    def add_entry(self, usage: RequestUsage, timestamp: float | None = None) -> None:
+        """Add a new usage entry with timestamp.
+
+        Args:
+            usage: The usage information to record.
+            timestamp: Optional explicit timestamp. If None, uses current time.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        self.entries.append(TimedUsageEntry(timestamp=timestamp, usage=usage))
+
+    def get_usage_in_window(self, window_seconds: float) -> RunUsage:
+        """Calculate total usage within the last N seconds.
+
+        Args:
+            window_seconds: The size of the time window in seconds (e.g., 60.0 for last minute).
+
+        Returns:
+            Aggregated usage from all entries within the time window.
+        """
+        cutoff = time.time() - window_seconds
+
+        # Sum up usage from entries within the window
+        total = RunUsage()
+        requests = 0
+        for entry in self.entries:
+            if entry.timestamp >= cutoff:
+                total.incr(entry.usage)
+                requests += 1
+
+        # Set request count based on number of entries in window
+        total.requests = requests
+        return total
+
+    def cleanup_old_entries(self, window_seconds: float) -> None:
+        """Remove entries older than the specified window to prevent memory growth.
+
+        Args:
+            window_seconds: Entries older than this will be removed.
+        """
+        cutoff = time.time() - window_seconds
+        self.entries = [e for e in self.entries if e.timestamp >= cutoff]
+
+
 @dataclass(repr=False, kw_only=True)
 class UsageLimits:
     """Limits on model usage.
@@ -270,6 +341,16 @@ class UsageLimits:
     to enforce `request_tokens_limit` ahead of time. This may incur additional overhead
     (from calling the model's `count_tokens` API before making the actual request) and is disabled by default."""
 
+    # Per-minute rate limits (sliding window)
+    requests_per_minute: int | None = None
+    """The maximum number of requests allowed per minute (60-second sliding window)."""
+    input_tokens_per_minute: int | None = None
+    """The maximum number of input tokens allowed per minute (60-second sliding window)."""
+    output_tokens_per_minute: int | None = None
+    """The maximum number of output tokens allowed per minute (60-second sliding window)."""
+    total_tokens_per_minute: int | None = None
+    """The maximum total tokens (input + output) allowed per minute (60-second sliding window)."""
+
     @property
     @deprecated('`request_tokens_limit` is deprecated, use `input_tokens_limit` instead')
     def request_tokens_limit(self) -> int | None:
@@ -290,6 +371,10 @@ class UsageLimits:
         output_tokens_limit: int | None = None,
         total_tokens_limit: int | None = None,
         count_tokens_before_request: bool = False,
+        requests_per_minute: int | None = None,
+        input_tokens_per_minute: int | None = None,
+        output_tokens_per_minute: int | None = None,
+        total_tokens_per_minute: int | None = None,
     ) -> None:
         self.request_limit = request_limit
         self.tool_calls_limit = tool_calls_limit
@@ -297,6 +382,10 @@ class UsageLimits:
         self.output_tokens_limit = output_tokens_limit
         self.total_tokens_limit = total_tokens_limit
         self.count_tokens_before_request = count_tokens_before_request
+        self.requests_per_minute = requests_per_minute
+        self.input_tokens_per_minute = input_tokens_per_minute
+        self.output_tokens_per_minute = output_tokens_per_minute
+        self.total_tokens_per_minute = total_tokens_per_minute
 
     @overload
     @deprecated(
@@ -311,6 +400,10 @@ class UsageLimits:
         response_tokens_limit: int | None = None,
         total_tokens_limit: int | None = None,
         count_tokens_before_request: bool = False,
+        requests_per_minute: int | None = None,
+        input_tokens_per_minute: int | None = None,
+        output_tokens_per_minute: int | None = None,
+        total_tokens_per_minute: int | None = None,
     ) -> None:
         self.request_limit = request_limit
         self.tool_calls_limit = tool_calls_limit
@@ -318,6 +411,10 @@ class UsageLimits:
         self.output_tokens_limit = response_tokens_limit
         self.total_tokens_limit = total_tokens_limit
         self.count_tokens_before_request = count_tokens_before_request
+        self.requests_per_minute = requests_per_minute
+        self.input_tokens_per_minute = input_tokens_per_minute
+        self.output_tokens_per_minute = output_tokens_per_minute
+        self.total_tokens_per_minute = total_tokens_per_minute
 
     def __init__(
         self,
@@ -328,6 +425,10 @@ class UsageLimits:
         output_tokens_limit: int | None = None,
         total_tokens_limit: int | None = None,
         count_tokens_before_request: bool = False,
+        requests_per_minute: int | None = None,
+        input_tokens_per_minute: int | None = None,
+        output_tokens_per_minute: int | None = None,
+        total_tokens_per_minute: int | None = None,
         # deprecated:
         request_tokens_limit: int | None = None,
         response_tokens_limit: int | None = None,
@@ -338,6 +439,10 @@ class UsageLimits:
         self.output_tokens_limit = output_tokens_limit or response_tokens_limit
         self.total_tokens_limit = total_tokens_limit
         self.count_tokens_before_request = count_tokens_before_request
+        self.requests_per_minute = requests_per_minute
+        self.input_tokens_per_minute = input_tokens_per_minute
+        self.output_tokens_per_minute = output_tokens_per_minute
+        self.total_tokens_per_minute = total_tokens_per_minute
 
     def has_token_limits(self) -> bool:
         """Returns `True` if this instance places any limits on token counts.
@@ -392,6 +497,100 @@ class UsageLimits:
         if tool_calls_limit is not None and tool_calls > tool_calls_limit:
             raise UsageLimitExceeded(
                 f'The next tool call(s) would exceed the tool_calls_limit of {tool_calls_limit} ({tool_calls=}).'
+            )
+
+    def has_per_minute_limits(self) -> bool:
+        """Returns `True` if this instance places any per-minute limits.
+
+        If this returns `False`, the per-minute checking methods will never raise an error.
+        """
+        return any(
+            limit is not None
+            for limit in (
+                self.requests_per_minute,
+                self.input_tokens_per_minute,
+                self.output_tokens_per_minute,
+                self.total_tokens_per_minute,
+            )
+        )
+
+    def check_per_minute_limits_before_request(
+        self, usage_history: UsageHistory, projected_input_tokens: int = 0
+    ) -> None:
+        """Check if making a request would exceed per-minute limits.
+
+        Args:
+            usage_history: The usage history to check against.
+            projected_input_tokens: The expected input tokens for the next request (if known).
+
+        Raises:
+            UsageLimitExceeded: If the next request would exceed any per-minute limit.
+        """
+        if not self.has_per_minute_limits():
+            return
+
+        # Get usage in last 60 seconds
+        window_usage = usage_history.get_usage_in_window(60.0)
+
+        # Check requests per minute
+        if self.requests_per_minute is not None:
+            if window_usage.requests + 1 > self.requests_per_minute:
+                raise UsageLimitExceeded(
+                    f'The next request would exceed the requests_per_minute limit of {self.requests_per_minute} '
+                    f'(requests_in_last_minute={window_usage.requests})'
+                )
+
+        # Check input tokens per minute (if we have a projection)
+        if projected_input_tokens > 0 and self.input_tokens_per_minute is not None:
+            projected_input = window_usage.input_tokens + projected_input_tokens
+            if projected_input > self.input_tokens_per_minute:
+                raise UsageLimitExceeded(
+                    f'The next request would exceed the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
+                    f'(projected_input_tokens_in_last_minute={projected_input})'
+                )
+
+        # Check total tokens per minute (if we have a projection)
+        if projected_input_tokens > 0 and self.total_tokens_per_minute is not None:
+            projected_total = window_usage.total_tokens + projected_input_tokens
+            if projected_total > self.total_tokens_per_minute:
+                raise UsageLimitExceeded(
+                    f'The next request would exceed the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
+                    f'(projected_total_tokens_in_last_minute={projected_total})'
+                )
+
+    def check_per_minute_limits_after_response(self, usage_history: UsageHistory) -> None:
+        """Check if actual usage exceeded per-minute limits.
+
+        Args:
+            usage_history: The usage history to check against.
+
+        Raises:
+            UsageLimitExceeded: If actual usage exceeded any per-minute limit.
+        """
+        if not self.has_per_minute_limits():
+            return
+
+        window_usage = usage_history.get_usage_in_window(60.0)
+
+        # Check input tokens per minute
+        if self.input_tokens_per_minute is not None and window_usage.input_tokens > self.input_tokens_per_minute:
+            raise UsageLimitExceeded(
+                f'Exceeded the input_tokens_per_minute limit of {self.input_tokens_per_minute} '
+                f'(input_tokens_in_last_minute={window_usage.input_tokens})'
+            )
+
+        # Check output tokens per minute
+        if self.output_tokens_per_minute is not None and window_usage.output_tokens > self.output_tokens_per_minute:
+            raise UsageLimitExceeded(
+                f'Exceeded the output_tokens_per_minute limit of {self.output_tokens_per_minute} '
+                f'(output_tokens_in_last_minute={window_usage.output_tokens})'
+            )
+
+        # Check total tokens per minute
+        if self.total_tokens_per_minute is not None and window_usage.total_tokens > self.total_tokens_per_minute:
+            raise UsageLimitExceeded(
+                f'Exceeded the total_tokens_per_minute limit of {self.total_tokens_per_minute} '
+                f'(total_tokens_in_last_minute={window_usage.total_tokens})'
             )
 
     __repr__ = _utils.dataclasses_no_defaults_repr
