@@ -300,6 +300,13 @@ class UsageHistory:
     def get_usage_in_window(self, window_seconds: float) -> RunUsage:
         """Calculate total usage within the last N seconds.
 
+        Warning: This method is NOT thread-safe on its own. It should only be called:
+        1. Within the context of self._lock (when called by UsageLimits check methods)
+        2. In single-threaded scenarios (e.g., tests with explicit timestamps)
+
+        For thread-safe usage in production code, this is called automatically by
+        UsageLimits.check_per_minute_limits_*() methods which hold the lock.
+
         Args:
             window_seconds: The size of the time window in seconds (e.g., 60.0 for last minute).
 
@@ -323,11 +330,42 @@ class UsageHistory:
     def cleanup_old_entries(self, window_seconds: float) -> None:
         """Remove entries older than the specified window to prevent memory growth.
 
+        Warning: This method is NOT thread-safe. Use cleanup_old_entries_atomic() for
+        concurrent scenarios.
+
         Args:
             window_seconds: Entries older than this will be removed.
         """
         cutoff = time.monotonic() - window_seconds
         self.entries = [e for e in self.entries if e.timestamp >= cutoff]
+
+    async def add_entry_atomic(self, usage: RequestUsage, timestamp: float | None = None) -> None:
+        """Add a new usage entry with timestamp in a thread-safe manner.
+
+        This method acquires the internal lock to ensure thread-safe access when called
+        from concurrent code (e.g., multiple tool calls executing in parallel).
+
+        Args:
+            usage: The usage information to record.
+            timestamp: Optional explicit timestamp. If None, uses current monotonic time.
+        """
+        if timestamp is None:
+            timestamp = time.monotonic()
+        async with self._lock:
+            self.entries.append(TimedUsageEntry(timestamp=timestamp, usage=usage))
+
+    async def cleanup_old_entries_atomic(self, window_seconds: float) -> None:
+        """Remove entries older than the specified window in a thread-safe manner.
+
+        This method acquires the internal lock to ensure thread-safe access when called
+        from concurrent code.
+
+        Args:
+            window_seconds: Entries older than this will be removed.
+        """
+        cutoff = time.monotonic() - window_seconds
+        async with self._lock:
+            self.entries = [e for e in self.entries if e.timestamp >= cutoff]
 
 
 @dataclass(repr=False, kw_only=True)

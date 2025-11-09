@@ -17,6 +17,14 @@ if TYPE_CHECKING:
     from .result import RunUsage
     from .usage import UsageHistory
 
+
+def _default_usage_history() -> UsageHistory:
+    """Lazy import to avoid circular dependency."""
+    from .usage import UsageHistory
+
+    return UsageHistory()
+
+
 # TODO (v2): Change the default for all typevars like this from `None` to `object`
 AgentDepsT = TypeVar('AgentDepsT', default=None, contravariant=True)
 """Type variable for agent dependencies."""
@@ -35,7 +43,7 @@ class RunContext(Generic[RunContextAgentDepsT]):
     """The model used in this run."""
     usage: RunUsage
     """LLM usage associated with the run."""
-    usage_history: UsageHistory
+    usage_history: UsageHistory = field(default_factory=_default_usage_history)
     """Usage history for per-minute rate limiting."""
     prompt: str | Sequence[_messages.UserContent] | None = None
     """The original user prompt passed to the run."""

@@ -497,7 +497,7 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         # Always clean up old usage history entries to prevent memory growth
         # (even if per-minute limits are disabled now, they may have been enabled earlier)
-        ctx.state.usage_history.cleanup_old_entries(60.0)
+        await ctx.state.usage_history.cleanup_old_entries_atomic(60.0)
 
         projected_input_tokens = 0
         if ctx.deps.usage_limits.count_tokens_before_request:
@@ -529,7 +529,7 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         # Add response to usage history for per-minute rate limiting
         if ctx.deps.usage_limits.has_per_minute_limits():
-            ctx.state.usage_history.add_entry(response.usage)
+            await ctx.state.usage_history.add_entry_atomic(response.usage)
 
         if ctx.deps.usage_limits:  # pragma: no branch
             # Check cumulative token limits
